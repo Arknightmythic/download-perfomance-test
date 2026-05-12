@@ -14,14 +14,16 @@ class GenerateBankDataExport implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 3600;
-    public int $tries = 2;
+    public int $timeout = 7200; // Tingkatkan ke 2 jam jika data mencapai 6 juta+
+    public int $tries = 1;      // Sebaiknya 1 saja, jika gagal jangan diulang otomatis dari awal (file bisa corrupt)
 
     public function __construct(private ExportJob $exportJob) {}
 
     public function handle(): void
     {
         $this->exportJob->update(['status' => 'processing']);
+
+        $handle = null; // Inisialisasi awal
 
         try {
             $from     = $this->exportJob->date_from;
@@ -34,45 +36,64 @@ class GenerateBankDataExport implements ShouldQueue
             }
 
             $handle = fopen($filePath, 'w');
-            stream_set_write_buffer($handle, 8 * 1024 * 1024); // ✅ 8MB buffer
+            stream_set_write_buffer($handle, 8 * 1024 * 1024); // 8MB buffer sudah sangat baik
 
-            fputcsv($handle, [
+            $filename = "exports/bank_data_{$from->format('Ymd')}_{$to->format('Ymd')}_{$this->exportJob->id}.csv";
+            $finalFilePath = storage_path("app/$filename");
+
+            if (!is_dir(storage_path('app/exports'))) {
+                mkdir(storage_path('app/exports'), 0755, true);
+            }
+
+            // TRIK BYPASS WSL2: Gunakan sys_get_temp_dir() yang murni berada di dalam Linux
+            $tmpFilePath = sys_get_temp_dir() . '/' . basename($filename);
+            
+            $handle = fopen($tmpFilePath, 'w');
+            stream_set_write_buffer($handle, 8 * 1024 * 1024);
+
+            $headers = [
                 'id', 'transaction_date', 'account_number',
                 'transaction_type', 'amount', 'balance',
                 'description', 'branch_code', 'currency', 'created_at',
-            ]);
+            ];
+            
+            fputcsv($handle, $headers);
 
-            // ✅ chunk lebih efisien dari cursor untuk jutaan rows
-            DB::table('bank_data')
+            $query = DB::table('bank_data')
                 ->whereBetween('transaction_date', [
                     $from->format('Y-m-d'),
                     $to->format('Y-m-d'),
                 ])
                 ->orderBy('transaction_date')
                 ->orderBy('id')
-                ->select([
-                    'id', 'transaction_date', 'account_number',
-                    'transaction_type', 'amount', 'balance',
-                    'description', 'branch_code', 'currency', 'created_at',
-                ])
-                ->chunk(2000, function ($rows) use ($handle) {
-                    foreach ($rows as $row) {
-                        fputcsv($handle, (array) $row);
-                    }
-                });
+                ->select($headers);
+
+            // Proses tulis 6 juta baris sekarang berjalan secepat kilat murni di Linux
+            foreach ($query->cursor() as $row) {
+                fputcsv($handle, (array) $row);
+            }
 
             fclose($handle);
+
+            // Setelah selesai merangkai 680MB, copy HANYA 1 KALI ke folder Windows
+            copy($tmpFilePath, $finalFilePath);
+            unlink($tmpFilePath); // Hapus file temporary
 
             $this->exportJob->update([
                 'status'    => 'done',
                 'file_path' => $filename,
-                'file_size' => filesize($filePath),
+                'file_size' => filesize($finalFilePath),
             ]);
 
         } catch (\Throwable $e) {
             if (isset($handle) && is_resource($handle)) {
                 fclose($handle);
             }
+            // Opsional: Hapus file jika gagal agar tidak memakan space
+            if (isset($filePath) && file_exists($filePath)) {
+                unlink($filePath);
+            }
+            
             $this->exportJob->update([
                 'status' => 'failed',
                 'error'  => $e->getMessage(),

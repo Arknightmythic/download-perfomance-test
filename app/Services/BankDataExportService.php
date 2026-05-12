@@ -4,27 +4,32 @@ namespace App\Services;
 
 use App\Models\BankData;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB; // ✅ Tambahkan import Facade DB
 
 class BankDataExportService
 {
     const STREAM_THRESHOLD = 1_000; // ✅ hampir semua masuk queue
 
     public function estimateRowCount(Carbon $from, Carbon $to): int
-{
-    // ✅ Pakai reltuples — approximate count, jauh lebih cepat
-    $result = \DB::selectOne("
-        SELECT reltuples::bigint AS estimate
-        FROM pg_class
-        WHERE relname = 'bank_data'
-    ");
+    {
+        // ✅ Ubah \DB menjadi DB
+        $result = DB::selectOne("
+            SELECT reltuples::bigint AS estimate
+            FROM pg_class
+            WHERE relname = 'bank_data'
+        ");
 
-    // Kalau rentang < 30 hari, proporsi dari total
-    $totalDays = 180; // sesuaikan dengan rentang data seed kamu
-    $rangeDays = $from->diffInDays($to) + 1;
+        // Kalau rentang < 30 hari, proporsi dari total
+        $totalDays = 180; // sesuaikan dengan rentang data seed kamu
+        $rangeDays = $from->diffInDays($to) + 1;
 
-    return (int) (($result->estimate ?? 0) * ($rangeDays / $totalDays));
-}
+        return (int) (($result->estimate ?? 0) * ($rangeDays / $totalDays));
+    }
 
+    /**
+     * Stream data ke output.
+     * * @param resource $outputStream ✅ Tambahkan PHPDoc untuk menghilangkan warning parameter
+     */
     public function streamCsv(Carbon $from, Carbon $to, $outputStream): void
     {
         $headers = [
@@ -35,7 +40,8 @@ class BankDataExportService
 
         fputcsv($outputStream, $headers);
 
-        BankData::whereBetween('transaction_date', [
+        // ✅ Ubah \DB menjadi DB
+        DB::table('bank_data')->whereBetween('transaction_date', [
             $from->format('Y-m-d'),
             $to->format('Y-m-d'),
         ])
@@ -43,7 +49,7 @@ class BankDataExportService
         ->orderBy('id')
         ->select($headers)
         ->cursor()
-        ->each(fn($row) => fputcsv($outputStream, $row->toArray()));
+        ->each(fn($row) => fputcsv($outputStream, (array) $row)); 
     }
 
     public function generateToFile(Carbon $from, Carbon $to, string $filePath): void

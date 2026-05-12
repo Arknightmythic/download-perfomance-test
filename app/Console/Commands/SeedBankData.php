@@ -63,7 +63,11 @@ class SeedBankData extends Command
                 $rows[] = $this->makeRow($startTs, $endTs);
             }
 
-            DB::table('bank_data')->insert($rows);
+            // Pecah lagi array $rows menjadi potongan maksimal 5000 per query insert
+            // untuk menghindari limit 65535 parameter PDO.
+            foreach (array_chunk($rows, 5000) as $safeChunk) {
+                DB::table('bank_data')->insert($safeChunk);
+            }
 
             $inserted += $batchSize;
             $bar->advance();
